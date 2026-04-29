@@ -251,6 +251,7 @@
   </div>
 
 </div>
+
 <script>
 let currentMode = 'invoice';
 let currentFile = null;
@@ -264,45 +265,27 @@ const SUMMARY_KEYS = {
   custom:   []
 };
 
-// Check Ollama health on load
+// Check health
 async function checkHealth() {
   try {
     const r = await fetch('/api/health');
     const data = await r.json();
+
     const dot = document.getElementById('status-dot');
     const label = document.getElementById('status-label');
     const banner = document.getElementById('banner');
 
-    if (data.model_ready) {
+    if (data.status === 'ok') {
       dot.style.background = '#16a34a';
-      label.textContent = data.model + ' ready';
-      // Populate model dropdown from available models
-      if (data.available_models && data.available_models.length > 0) {
-        const sel = document.getElementById('model-select');
-        sel.innerHTML = '';
-        data.available_models.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m; opt.textContent = m;
-          if (m.includes('llama3.2-vision') || m.includes(data.model)) opt.selected = true;
-          sel.appendChild(opt);
-        });
-        selectedModel = sel.value;
-      }
-    } else if (data.ollama === 'reachable') {
-      dot.style.background = '#f59e0b';
-      label.textContent = 'Pulling model...';
-      banner.className = 'banner warn';
-      banner.style.display = 'block';
-      banner.textContent = '⏳ Ollama is running but the model is still downloading. This can take a few minutes on first run. Refresh this page once it\'s done.';
-      setTimeout(checkHealth, 8000); // retry
+      label.textContent = 'Ollama connected';
     } else {
       dot.style.background = '#dc2626';
       label.textContent = 'Ollama offline';
       banner.className = 'banner error';
       banner.style.display = 'block';
-      banner.textContent = '❌ Cannot reach Ollama. Make sure you ran: docker compose up';
+      banner.textContent = '❌ Ollama is not reachable. Run: docker compose up';
     }
-  } catch {
+  } catch (e) {
     document.getElementById('status-dot').style.background = '#dc2626';
     document.getElementById('status-label').textContent = 'Offline';
   }
@@ -317,8 +300,15 @@ function setMode(m) {
   document.getElementById('custom-prompt-wrap').style.display = m === 'custom' ? 'block' : 'none';
 }
 
-function handleDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('dragging'); }
-function handleDragLeave() { document.getElementById('drop-zone').classList.remove('dragging'); }
+function handleDragOver(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.add('dragging');
+}
+
+function handleDragLeave() {
+  document.getElementById('drop-zone').classList.remove('dragging');
+}
+
 function handleDrop(e) {
   e.preventDefault();
   document.getElementById('drop-zone').classList.remove('dragging');
@@ -329,118 +319,161 @@ function handleDrop(e) {
 function handleFile(f) {
   if (!f) return;
   currentFile = f;
+
   document.getElementById('drop-zone').classList.add('has-file');
   document.getElementById('drop-content').style.display = 'none';
   document.getElementById('file-preview').style.display = 'block';
+
   document.getElementById('file-name').textContent = f.name;
   document.getElementById('file-size').textContent = (f.size / 1024).toFixed(1) + ' KB';
+
   document.getElementById('process-btn').disabled = false;
   document.getElementById('results').style.display = 'none';
 }
 
+
+
+
 async function processDocument() {
   if (!currentFile) return;
+
   document.getElementById('process-btn').disabled = true;
   document.getElementById('status-bar').style.display = 'flex';
   document.getElementById('results').style.display = 'none';
-
-  const steps = ['Uploading file...', 'Running vision model...', 'Extracting fields...', 'Finishing up...'];
-  let si = 0;
-  const statusEl = document.getElementById('status-text');
-  statusEl.textContent = steps[0];
-  const ticker = setInterval(() => {
-    si = Math.min(si + 1, steps.length - 1);
-    statusEl.textContent = steps[si];
-  }, 4000);
 
   try {
     const form = new FormData();
     form.append('file', currentFile);
     form.append('mode', currentMode);
-    if (currentMode === 'custom') form.append('custom_prompt', document.getElementById('custom-prompt').value.trim());
 
-    const response = await fetch('/api/process', { method: 'POST', body: form });
+    if (currentMode === 'custom') {
+      form.append(
+        'custom_prompt',
+        document.getElementById('custom-prompt').value.trim()
+      );
+    }
+
+    const response = await fetch('/api/process', {
+      method: 'POST',
+      body: form
+    });
+
     const result = await response.json();
-    if (!response.ok) throw new Error(result.detail || 'Server error');
 
-    let raw = result.raw || '';
-    let cleaned = raw.replace(/```json|```/g, '').trim();
-    const s = cleaned.indexOf('{'), e = cleaned.lastIndexOf('}');
-    if (s !== -1 && e !== -1) cleaned = cleaned.slice(s, e + 1);
-    extractedData = JSON.parse(cleaned);
-    renderResults(extractedData, result.usage);
+    // ❌ Handle backend errors first
+    if (!response.ok) {
+      throw new Error(result.detail || result.error || 'Server error');
+    }
+
+    if (!result.data) {
+      throw new Error('Invalid response from backend');
+    }
+
+    // ---------------- SAFE PARSING LAYER ----------------
+    let cleaned = result.data;
+
+    // If backend accidentally returns string instead of object
+    if (typeof cleaned === 'string') {
+      cleaned = cleaned.replace(/```json|```/g, '').trim();
+
+      const start = cleaned.indexOf('{');
+      const end = cleaned.lastIndexOf('}');
+
+      if (start !== -1 && end !== -1) {
+        cleaned = cleaned.slice(start, end + 1);
+      }
+
+      try {
+        extractedData = JSON.parse(cleaned);
+      } catch (e) {
+        extractedData = {
+          error: "invalid_json",
+          raw: cleaned
+        };
+      }
+
+    } else {
+      // already JSON object from backend
+      extractedData = cleaned;
+    }
+
+    renderResults(extractedData);
+
   } catch (err) {
     const b = document.getElementById('banner');
     b.className = 'banner error';
     b.style.display = 'block';
     b.textContent = 'Error: ' + err.message;
   } finally {
-    clearInterval(ticker);
     document.getElementById('status-bar').style.display = 'none';
     document.getElementById('process-btn').disabled = false;
   }
 }
 
-function renderResults(data, usage) {
+
+
+
+function renderResults(data) {
   const summaryKeys = SUMMARY_KEYS[currentMode] || [];
+
   const cards = document.getElementById('summary-cards');
   cards.innerHTML = '';
+
   summaryKeys.forEach(k => {
     const val = data[k];
-    if (!val || val === 'null') return;
-    cards.innerHTML += `<div class="summary-card"><div class="card-label">${k.replace(/_/g,' ')}</div><div class="card-value">${esc(String(val))}</div></div>`;
+    if (!val) return;
+    cards.innerHTML += `
+      <div class="summary-card">
+        <div class="card-label">${k}</div>
+        <div class="card-value">${esc(String(val))}</div>
+      </div>`;
   });
 
   const fields = document.getElementById('fields-grid');
   fields.innerHTML = '';
+
   Object.entries(data).forEach(([k, v]) => {
-    if (!v || v === 'null' || summaryKeys.includes(k)) return;
-    let display = '';
-    if (Array.isArray(v)) {
-      if (!v.length) return;
-      if (typeof v[0] === 'string') {
-        display = v.map(s => `<span class="tag">${esc(s)}</span>`).join('');
-      } else {
-        display = v.map(item => {
-          const pairs = Object.entries(item).filter(([,iv])=>iv&&iv!=='null')
-            .map(([ik,iv])=>`<span class="list-key">${ik.replace(/_/g,' ')}:</span>${esc(Array.isArray(iv)?iv.join(', '):String(iv))}`).join(' · ');
-          return `<div class="list-item">${pairs}</div>`;
-        }).join('');
-      }
-    } else {
-      display = `<span style="font-size:13px;line-height:1.5">${esc(String(v))}</span>`;
-    }
-    fields.innerHTML += `<div class="field-item"><div class="field-label">${k.replace(/_/g,' ')}</div><div>${display}</div></div>`;
+    if (!v || summaryKeys.includes(k)) return;
+
+    fields.innerHTML += `
+      <div class="field-item">
+        <div class="field-label">${k}</div>
+        <div style="font-size:13px">${esc(JSON.stringify(v))}</div>
+      </div>`;
   });
 
-  document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
-  if (usage) {
-    document.getElementById('usage-info').innerHTML =
-      `<div class="usage-badge">Tokens: ${usage.input_tokens} in / ${usage.output_tokens} out — processed locally</div>`;
-  }
+  document.getElementById('json-output').textContent =
+    JSON.stringify(data, null, 2);
+
   document.getElementById('results').style.display = 'block';
 }
 
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) {
+  return s.replace(/&/g,'&amp;')
+          .replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;');
+}
 
 function copyJSON() {
   if (!extractedData) return;
   navigator.clipboard.writeText(JSON.stringify(extractedData, null, 2));
+
   const btn = document.getElementById('copy-btn');
   btn.textContent = 'Copied!';
   setTimeout(() => btn.textContent = 'Copy JSON', 1500);
 }
 
 function resetApp() {
-  currentFile = null; extractedData = null;
+  currentFile = null;
+  extractedData = null;
+
   document.getElementById('drop-zone').classList.remove('has-file');
   document.getElementById('file-preview').style.display = 'none';
   document.getElementById('drop-content').style.display = 'block';
   document.getElementById('results').style.display = 'none';
   document.getElementById('process-btn').disabled = true;
-  document.getElementById('file-input').value = '';
-  document.getElementById('usage-info').innerHTML = '';
 }
 </script>
+
 </body>
 </html>

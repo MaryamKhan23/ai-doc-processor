@@ -3,11 +3,12 @@ import base64
 import httpx
 import json
 import re
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from typing import Optional
-import fitz  # PyMuPDF
+import fitz
 
 app = FastAPI(title="AI Document Processor (Local)")
 
@@ -18,60 +19,72 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-MODEL_NAME = os.environ.get("MODEL_NAME", "llama3.2:3b")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+MODEL_NAME = os.environ.get("MODEL_NAME", "llava:7b")
 
 
 # ---------------- PROMPTS ----------------
 PROMPTS = {
-    "invoice": """Extract structured invoice data.
-Return ONLY valid JSON:
+    "invoice": """Extract invoice data. Return ONLY valid JSON:
 {"vendor_name":"","vendor_address":"","invoice_number":"","invoice_date":"","due_date":"","subtotal":"","tax":"","total":"","currency":"","line_items":[]}
-No explanations, no markdown.""",
+No extra text.""",
 
-    "resume": """You are a STRICT extraction system.
+    "resume": """You are a strict OCR system.
 
 RULES:
-- Use ONLY visible text
-- Do NOT guess anything
-- If missing, return null
-- Return ONLY JSON
+- ONLY use visible text
+- NEVER guess anything
+- NEVER use placeholders like "John Doe"
+- If missing → null
 
-Output:
+Return ONLY JSON:
 {
   "full_name": null,
   "email": null,
   "phone": null,
+  "location": null,
+  "linkedin": null,
   "skills": [],
   "experience": [],
   "education": []
 }
 """,
 
-    "research": """Extract structured research paper data.
-Return ONLY valid JSON:
+    "research": """Extract research data. Return ONLY JSON:
 {"title":"","authors":[],"summary":"","key_findings":[]}
-No explanations, no markdown."""
+"""
 }
 
 
 # ---------------- PDF → IMAGE ----------------
 def pdf_to_base64_image(file_bytes: bytes):
-    """
-    Convert ONLY FIRST PAGE of PDF to image
-    (prevents memory overload in Ollama)
-    """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     page = doc[0]
-
     pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-    img_bytes = pix.tobytes("png")
-
-    return base64.b64encode(img_bytes).decode("utf-8")
+    return base64.b64encode(pix.tobytes("png")).decode("utf-8")
 
 
-# ---------------- JSON CLEANER ----------------
+# ---------------- STRICT JSON FIXER ----------------
+def clean_json_keys(text: str):
+    """
+    Fix common LLM mistakes like:
+    "education[]" → "education"
+    """
+    text = text.replace('"education[]"', '"education"')
+    text = text.replace("'education[]'", '"education"')
+    return text
+
 def extract_json(text: str):
+    if not text:
+        return {"error": "empty_response"}
+
+    # FIX malformed keys BEFORE parsing
+    text = text.replace('"education[]"', '"education"')
+    text = text.replace("'education[]'", '"education"')
+
+    # remove markdown fences if any
+    text = text.replace("```json", "").replace("```", "").strip()
+
     try:
         return json.loads(text)
     except:
@@ -79,15 +92,23 @@ def extract_json(text: str):
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
+        cleaned = match.group()
+
+        # second safety cleanup
+        cleaned = cleaned.replace('"education[]"', '"education"')
+
         try:
-            return json.loads(match.group())
+            return json.loads(cleaned)
         except:
             pass
 
-    return {"raw_output": text}
+    return {
+        "error": "invalid_json",
+        "raw_output": text
+    }
 
 
-# ---------------- MAIN ENDPOINT ----------------
+# ---------------- API ----------------
 @app.post("/api/process")
 async def process_document(
     file: UploadFile = File(...),
@@ -98,28 +119,22 @@ async def process_document(
     file_bytes = await file.read()
 
     if len(file_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 20MB)")
+        return JSONResponse(status_code=400, content={"error": "file_too_large"})
 
     is_pdf = file.filename.lower().endswith(".pdf")
 
-    # ---------------- IMAGE PREP ----------------
-    if is_pdf:
-        try:
-            b64_image = pdf_to_base64_image(file_bytes)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-    else:
-        b64_image = base64.b64encode(file_bytes).decode("utf-8")
+    try:
+        b64_image = pdf_to_base64_image(file_bytes) if is_pdf else base64.b64encode(file_bytes).decode()
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": "image_error", "details": str(e)})
 
-    # ---------------- PROMPT ----------------
+    prompt = PROMPTS.get(mode)
     if mode == "custom":
-        prompt = (custom_prompt or "Extract structured data") + "\nReturn ONLY JSON."
-    else:
-        prompt = PROMPTS.get(mode)
-        if not prompt:
-            raise HTTPException(status_code=400, detail="Invalid mode")
+        prompt = (custom_prompt or "Extract data") + "\nReturn ONLY JSON."
 
-    # ---------------- OLLAMA REQUEST ----------------
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": "invalid_mode"})
+
     payload = {
         "model": MODEL_NAME,
         "messages": [
@@ -131,54 +146,38 @@ async def process_document(
         ],
         "stream": False,
         "options": {
-            "temperature": 0,
-            "num_predict": 1024,
+            "temperature": 0
         },
     }
 
-    async def call_ollama():
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            return await client.post(
-                f"{OLLAMA_HOST}/api/chat",
-                json=payload,
-            )
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        r = await client.post(f"{OLLAMA_HOST}/api/chat", json=payload)
+
+    if r.status_code != 200:
+        return JSONResponse(status_code=502, content={"error": "ollama_failed", "details": r.text})
 
     try:
-        response = await call_ollama()
-
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail=response.text)
-
-    except httpx.ReadTimeout:
-        raise HTTPException(status_code=504, detail="Model took too long to respond")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    # ---------------- PARSE RESPONSE ----------------
-    try:
-        data = response.json()
-        raw = data.get("message", {}).get("content", "")
+        raw = r.json()["message"]["content"]
     except:
-        raise HTTPException(status_code=500, detail="Invalid response from Ollama")
+        return JSONResponse(status_code=500, content={"error": "bad_ollama_response"})
 
     parsed = extract_json(raw)
 
     return {
         "success": True,
         "data": parsed,
-        "model": MODEL_NAME,
+        "model": MODEL_NAME
     }
 
 
-# ---------------- HEALTH CHECK ----------------
 @app.get("/api/health")
 async def health():
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{OLLAMA_HOST}/api/tags")
-        return {"status": "ok", "ollama": "connected"}
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.get(f"{OLLAMA_HOST}/api/tags")
+        return {"status": "ok"}
     except:
-        return {"status": "error", "ollama": "disconnected"}
+        return {"status": "error"}
 
 
 # ---------------- FRONTEND ----------------
