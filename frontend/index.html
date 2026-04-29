@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Document Processor — Local</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --blue: #2563eb;
+    --blue-light: #eff6ff;
+    --green: #16a34a;
+    --green-light: #f0fdf4;
+    --red-bg: #fef2f2; --red-border: #fca5a5; --red-text: #dc2626;
+    --amber-bg: #fffbeb; --amber-border: #fcd34d; --amber-text: #92400e;
+    --gray-50: #f9fafb; --gray-100: #f3f4f6; --gray-200: #e5e7eb;
+    --gray-400: #9ca3af; --gray-500: #6b7280; --gray-700: #374151;
+    --text: #111827;
+    --radius: 8px; --radius-lg: 12px;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--gray-50); color: var(--text);
+    min-height: 100vh; padding: 2.5rem 1rem;
+  }
+  .container { max-width: 740px; margin: 0 auto; }
+
+  /* Header */
+  .header { margin-bottom: 1.75rem; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .header-text h1 { font-size: 22px; font-weight: 600; letter-spacing: -.3px; }
+  .header-text p { font-size: 13px; color: var(--gray-500); margin-top: 4px; }
+  .local-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 500;
+    padding: 5px 10px; border-radius: 20px;
+    background: var(--green-light); color: var(--green);
+    border: 0.5px solid #bbf7d0; white-space: nowrap; flex-shrink: 0;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .dot.pulsing { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* Status banner */
+  .banner {
+    display: none; padding: 10px 14px; border-radius: var(--radius);
+    font-size: 13px; margin-bottom: 1rem; line-height: 1.5;
+  }
+  .banner.warn { background: var(--amber-bg); border: 0.5px solid var(--amber-border); color: var(--amber-text); }
+  .banner.error { background: var(--red-bg); border: 0.5px solid var(--red-border); color: var(--red-text); }
+  .banner.ok { background: var(--green-light); border: 0.5px solid #bbf7d0; color: var(--green); }
+
+  /* Card */
+  .card { background: #fff; border: 0.5px solid var(--gray-200); border-radius: var(--radius-lg); padding: 1.5rem; margin-bottom: 1rem; }
+
+  /* Model selector */
+  .model-row { display: flex; align-items: center; gap: 10px; margin-bottom: 1.25rem; }
+  .model-row label { font-size: 12px; color: var(--gray-500); white-space: nowrap; }
+  select {
+    flex: 1; padding: 8px 10px; border-radius: var(--radius);
+    border: 0.5px solid var(--gray-200); background: var(--gray-50);
+    font-size: 13px; font-family: inherit; color: var(--text); cursor: pointer;
+  }
+  select:focus { outline: none; border-color: var(--blue); }
+
+  /* Mode buttons */
+  .mode-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 1.25rem; }
+  .mode-btn {
+    padding: 10px 6px; border-radius: var(--radius);
+    border: 0.5px solid var(--gray-200); background: transparent;
+    color: var(--gray-700); font-size: 12px; cursor: pointer;
+    transition: all .15s; font-family: inherit;
+  }
+  .mode-btn:hover { border-color: var(--gray-400); background: var(--gray-50); }
+  .mode-btn.active { background: var(--blue-light); color: var(--blue); border-color: #93c5fd; font-weight: 500; }
+
+  textarea {
+    width: 100%; min-height: 72px; padding: 10px 12px;
+    border-radius: var(--radius); border: 0.5px solid var(--gray-200);
+    font-size: 13px; font-family: inherit; resize: vertical; color: var(--text);
+    margin-bottom: 1rem; transition: border-color .15s;
+  }
+  textarea:focus { outline: none; border-color: var(--blue); }
+
+  /* Drop zone */
+  .drop-zone {
+    border: 1.5px dashed var(--gray-200); border-radius: var(--radius-lg);
+    padding: 2.5rem 1rem; text-align: center; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop-zone:hover, .drop-zone.dragging { border-color: var(--blue); background: var(--blue-light); }
+  .drop-zone.has-file { border-color: var(--green); background: var(--green-light); }
+  .drop-icon {
+    width: 44px; height: 44px; margin: 0 auto 14px;
+    border-radius: 50%; background: var(--gray-100);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .drop-title { font-size: 14px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+  .drop-sub { font-size: 12px; color: var(--gray-500); }
+
+  .process-btn {
+    width: 100%; margin-top: 14px; padding: 13px;
+    border-radius: var(--radius); border: none;
+    background: var(--blue); color: #fff;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+    transition: opacity .15s; font-family: inherit;
+  }
+  .process-btn:disabled { opacity: .38; cursor: not-allowed; }
+  .process-btn:not(:disabled):hover { opacity: .88; }
+
+  /* Status bar */
+  .status-bar {
+    display: none; align-items: center; gap: 10px;
+    padding: 12px 14px; border-radius: var(--radius);
+    background: var(--gray-100); margin-bottom: 1rem;
+  }
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid var(--gray-200);
+    border-top-color: var(--blue); border-radius: 50%;
+    animation: spin .7s linear infinite; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-text { font-size: 13px; color: var(--gray-500); }
+  .status-note { font-size: 11px; color: var(--gray-400); margin-left: auto; }
+
+  /* Results */
+  .results { display: none; }
+  .results-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+  .results-title { font-size: 15px; font-weight: 600; }
+  .btn-row { display: flex; gap: 8px; }
+  .sm-btn {
+    padding: 7px 13px; font-size: 12px; border-radius: var(--radius);
+    border: 0.5px solid var(--gray-200); background: transparent;
+    color: var(--gray-500); cursor: pointer; font-family: inherit;
+    transition: background .12s;
+  }
+  .sm-btn:hover { background: var(--gray-50); }
+
+  .summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 1rem; }
+  .summary-card { background: var(--gray-50); border-radius: var(--radius); padding: 12px; }
+  .card-label { font-size: 10px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 5px; }
+  .card-value { font-size: 15px; font-weight: 500; word-break: break-word; }
+
+  .fields-grid { display: grid; gap: 8px; margin-bottom: 1rem; }
+  .field-item { background: #fff; border: 0.5px solid var(--gray-200); border-radius: var(--radius); padding: 10px 12px; }
+  .field-label { font-size: 10px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 7px; }
+  .tag { display: inline-block; padding: 3px 9px; margin: 2px; background: var(--gray-100); border-radius: 6px; font-size: 12px; color: var(--gray-700); }
+  .list-item { padding: 6px 0; border-bottom: 0.5px solid var(--gray-100); font-size: 12px; color: var(--gray-700); }
+  .list-item:last-child { border-bottom: none; }
+  .list-key { color: var(--gray-400); font-size: 11px; margin-right: 3px; }
+
+  .json-wrap { border: 0.5px solid var(--gray-200); border-radius: var(--radius); overflow: hidden; }
+  .json-header { padding: 9px 12px; background: var(--gray-50); border-bottom: 0.5px solid var(--gray-200); font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: .05em; }
+  pre { margin: 0; padding: 14px; font-size: 12px; font-family: 'SF Mono', 'Fira Code', Monaco, monospace; overflow-x: auto; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; }
+
+  .usage-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--gray-500); background: var(--gray-50); border: 0.5px solid var(--gray-200); padding: 4px 10px; border-radius: 20px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="header-text">
+      <h1>AI Document Processor</h1>
+      <p>Runs fully local — no internet required, no API keys, no data leaves your machine.</p>
+    </div>
+    <div class="local-badge">
+      <div class="dot pulsing" id="status-dot"></div>
+      <span id="status-label">Checking model...</span>
+    </div>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="card">
+    <div class="model-row">
+      <label for="model-select">Model</label>
+      <select id="model-select" onchange="selectedModel = this.value">
+        <option value="llama3.2-vision">llama3.2-vision (recommended)</option>
+        <option value="llava">llava</option>
+        <option value="llava:13b">llava:13b (slower, more accurate)</option>
+        <option value="minicpm-v">minicpm-v</option>
+        <option value="moondream">moondream (fastest)</option>
+      </select>
+    </div>
+
+    <div class="mode-grid">
+      <button class="mode-btn active" id="btn-invoice" onclick="setMode('invoice')">Invoice</button>
+      <button class="mode-btn" id="btn-resume" onclick="setMode('resume')">Resume</button>
+      <button class="mode-btn" id="btn-research" onclick="setMode('research')">Research paper</button>
+      <button class="mode-btn" id="btn-custom" onclick="setMode('custom')">Custom</button>
+    </div>
+
+    <div id="custom-prompt-wrap" style="display:none">
+      <textarea id="custom-prompt" placeholder="Describe what to extract — e.g. 'Extract all product names, quantities and prices'"></textarea>
+    </div>
+
+    <div class="drop-zone" id="drop-zone"
+      onclick="document.getElementById('file-input').click()"
+      ondragover="handleDragOver(event)"
+      ondragleave="handleDragLeave()"
+      ondrop="handleDrop(event)">
+      <input type="file" id="file-input" accept=".pdf,image/*" style="display:none" onchange="handleFile(this.files[0])">
+      <div id="drop-content">
+        <div class="drop-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p class="drop-title">Drop your file here</p>
+        <p class="drop-sub">PDF, PNG, JPG, WEBP — up to 20MB</p>
+      </div>
+      <div id="file-preview" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.5">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span id="file-name" style="font-size:14px;font-weight:500"></span>
+          <span id="file-size" style="font-size:12px;color:#9ca3af"></span>
+        </div>
+        <p style="margin:8px 0 0;font-size:12px;color:#9ca3af">Click to change file</p>
+      </div>
+    </div>
+
+    <button class="process-btn" id="process-btn" onclick="processDocument()" disabled>Process document</button>
+  </div>
+
+  <div class="status-bar" id="status-bar">
+    <div class="spinner"></div>
+    <span class="status-text" id="status-text">Processing...</span>
+    <span class="status-note">Local inference can take 15–60s depending on your hardware</span>
+  </div>
+
+  <div class="results" id="results">
+    <div class="results-header">
+      <span class="results-title">Extracted data</span>
+      <div class="btn-row">
+        <button class="sm-btn" id="copy-btn" onclick="copyJSON()">Copy JSON</button>
+        <button class="sm-btn" onclick="resetApp()">New document</button>
+      </div>
+    </div>
+    <div class="summary-cards" id="summary-cards"></div>
+    <div class="fields-grid" id="fields-grid"></div>
+    <div class="json-wrap">
+      <div class="json-header">Raw JSON output</div>
+      <pre id="json-output"></pre>
+    </div>
+    <div id="usage-info"></div>
+  </div>
+
+</div>
+<script>
+let currentMode = 'invoice';
+let currentFile = null;
+let extractedData = null;
+let selectedModel = 'llama3.2-vision';
+
+const SUMMARY_KEYS = {
+  invoice:  ['total','vendor_name','invoice_date','invoice_number'],
+  resume:   ['full_name','email','location'],
+  research: ['title','publication_year','journal_or_venue'],
+  custom:   []
+};
+
+// Check Ollama health on load
+async function checkHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const data = await r.json();
+    const dot = document.getElementById('status-dot');
+    const label = document.getElementById('status-label');
+    const banner = document.getElementById('banner');
+
+    if (data.model_ready) {
+      dot.style.background = '#16a34a';
+      label.textContent = data.model + ' ready';
+      // Populate model dropdown from available models
+      if (data.available_models && data.available_models.length > 0) {
+        const sel = document.getElementById('model-select');
+        sel.innerHTML = '';
+        data.available_models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m; opt.textContent = m;
+          if (m.includes('llama3.2-vision') || m.includes(data.model)) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        selectedModel = sel.value;
+      }
+    } else if (data.ollama === 'reachable') {
+      dot.style.background = '#f59e0b';
+      label.textContent = 'Pulling model...';
+      banner.className = 'banner warn';
+      banner.style.display = 'block';
+      banner.textContent = '⏳ Ollama is running but the model is still downloading. This can take a few minutes on first run. Refresh this page once it\'s done.';
+      setTimeout(checkHealth, 8000); // retry
+    } else {
+      dot.style.background = '#dc2626';
+      label.textContent = 'Ollama offline';
+      banner.className = 'banner error';
+      banner.style.display = 'block';
+      banner.textContent = '❌ Cannot reach Ollama. Make sure you ran: docker compose up';
+    }
+  } catch {
+    document.getElementById('status-dot').style.background = '#dc2626';
+    document.getElementById('status-label').textContent = 'Offline';
+  }
+}
+
+checkHealth();
+
+function setMode(m) {
+  currentMode = m;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + m).classList.add('active');
+  document.getElementById('custom-prompt-wrap').style.display = m === 'custom' ? 'block' : 'none';
+}
+
+function handleDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('dragging'); }
+function handleDragLeave() { document.getElementById('drop-zone').classList.remove('dragging'); }
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('dragging');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+}
+
+function handleFile(f) {
+  if (!f) return;
+  currentFile = f;
+  document.getElementById('drop-zone').classList.add('has-file');
+  document.getElementById('drop-content').style.display = 'none';
+  document.getElementById('file-preview').style.display = 'block';
+  document.getElementById('file-name').textContent = f.name;
+  document.getElementById('file-size').textContent = (f.size / 1024).toFixed(1) + ' KB';
+  document.getElementById('process-btn').disabled = false;
+  document.getElementById('results').style.display = 'none';
+}
+
+async function processDocument() {
+  if (!currentFile) return;
+  document.getElementById('process-btn').disabled = true;
+  document.getElementById('status-bar').style.display = 'flex';
+  document.getElementById('results').style.display = 'none';
+
+  const steps = ['Uploading file...', 'Running vision model...', 'Extracting fields...', 'Finishing up...'];
+  let si = 0;
+  const statusEl = document.getElementById('status-text');
+  statusEl.textContent = steps[0];
+  const ticker = setInterval(() => {
+    si = Math.min(si + 1, steps.length - 1);
+    statusEl.textContent = steps[si];
+  }, 4000);
+
+  try {
+    const form = new FormData();
+    form.append('file', currentFile);
+    form.append('mode', currentMode);
+    if (currentMode === 'custom') form.append('custom_prompt', document.getElementById('custom-prompt').value.trim());
+
+    const response = await fetch('/api/process', { method: 'POST', body: form });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Server error');
+
+    let raw = result.raw || '';
+    let cleaned = raw.replace(/```json|```/g, '').trim();
+    const s = cleaned.indexOf('{'), e = cleaned.lastIndexOf('}');
+    if (s !== -1 && e !== -1) cleaned = cleaned.slice(s, e + 1);
+    extractedData = JSON.parse(cleaned);
+    renderResults(extractedData, result.usage);
+  } catch (err) {
+    const b = document.getElementById('banner');
+    b.className = 'banner error';
+    b.style.display = 'block';
+    b.textContent = 'Error: ' + err.message;
+  } finally {
+    clearInterval(ticker);
+    document.getElementById('status-bar').style.display = 'none';
+    document.getElementById('process-btn').disabled = false;
+  }
+}
+
+function renderResults(data, usage) {
+  const summaryKeys = SUMMARY_KEYS[currentMode] || [];
+  const cards = document.getElementById('summary-cards');
+  cards.innerHTML = '';
+  summaryKeys.forEach(k => {
+    const val = data[k];
+    if (!val || val === 'null') return;
+    cards.innerHTML += `<div class="summary-card"><div class="card-label">${k.replace(/_/g,' ')}</div><div class="card-value">${esc(String(val))}</div></div>`;
+  });
+
+  const fields = document.getElementById('fields-grid');
+  fields.innerHTML = '';
+  Object.entries(data).forEach(([k, v]) => {
+    if (!v || v === 'null' || summaryKeys.includes(k)) return;
+    let display = '';
+    if (Array.isArray(v)) {
+      if (!v.length) return;
+      if (typeof v[0] === 'string') {
+        display = v.map(s => `<span class="tag">${esc(s)}</span>`).join('');
+      } else {
+        display = v.map(item => {
+          const pairs = Object.entries(item).filter(([,iv])=>iv&&iv!=='null')
+            .map(([ik,iv])=>`<span class="list-key">${ik.replace(/_/g,' ')}:</span>${esc(Array.isArray(iv)?iv.join(', '):String(iv))}`).join(' · ');
+          return `<div class="list-item">${pairs}</div>`;
+        }).join('');
+      }
+    } else {
+      display = `<span style="font-size:13px;line-height:1.5">${esc(String(v))}</span>`;
+    }
+    fields.innerHTML += `<div class="field-item"><div class="field-label">${k.replace(/_/g,' ')}</div><div>${display}</div></div>`;
+  });
+
+  document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
+  if (usage) {
+    document.getElementById('usage-info').innerHTML =
+      `<div class="usage-badge">Tokens: ${usage.input_tokens} in / ${usage.output_tokens} out — processed locally</div>`;
+  }
+  document.getElementById('results').style.display = 'block';
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function copyJSON() {
+  if (!extractedData) return;
+  navigator.clipboard.writeText(JSON.stringify(extractedData, null, 2));
+  const btn = document.getElementById('copy-btn');
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = 'Copy JSON', 1500);
+}
+
+function resetApp() {
+  currentFile = null; extractedData = null;
+  document.getElementById('drop-zone').classList.remove('has-file');
+  document.getElementById('file-preview').style.display = 'none';
+  document.getElementById('drop-content').style.display = 'block';
+  document.getElementById('results').style.display = 'none';
+  document.getElementById('process-btn').disabled = true;
+  document.getElementById('file-input').value = '';
+  document.getElementById('usage-info').innerHTML = '';
+}
+</script>
+</body>
+</html>
